@@ -58,7 +58,6 @@ static struct rdev *regulator_get_by_phandle(int32_t phandle)
 /*
  * Get a regulator from its node name
  *
- * @fdt - pointer to device tree memory
  * @node_name - name of the node "ldo1"
  * Return pointer to rdev if succeed, NULL else.
  */
@@ -171,11 +170,9 @@ static TEE_Result _regulator_enable(struct rdev *rdev)
 
 			unlock_driver(rdev);
 
-			if (rdev->supply_dev) {
-				res = regulator_disable(rdev->supply_dev);
-				if (res)
-					panic();
-			}
+			if (rdev->supply_dev &&
+			    regulator_disable(rdev->supply_dev))
+				panic();
 
 			return res;
 		}
@@ -188,7 +185,7 @@ static TEE_Result _regulator_enable(struct rdev *rdev)
 
 	unlock_driver(rdev);
 
-	FMSG("%s refcount: %u", rdev->desc->node_name, rdev->use_count);
+	FMSG("%s refcount: %"PRIu8, rdev->desc->node_name, rdev->use_count);
 
 	return TEE_SUCCESS;
 }
@@ -235,7 +232,7 @@ static TEE_Result _regulator_disable(struct rdev *rdev)
 
 	rdev->use_count--;
 
-	FMSG("%s refcount:%u", rdev->desc->node_name, rdev->use_count);
+	FMSG("%s refcount:%"PRIu8, rdev->desc->node_name, rdev->use_count);
 
 	unlock_driver(rdev);
 
@@ -305,7 +302,7 @@ TEE_Result regulator_set_voltage(struct rdev *rdev, uint16_t mvolt)
 		return TEE_ERROR_NOT_IMPLEMENTED;
 
 	if (mvolt < rdev->min_mv || mvolt > rdev->max_mv)
-		return TEE_ERROR_ACCESS_DENIED;
+		return TEE_ERROR_BAD_PARAMETERS;
 
 	lock_driver(rdev);
 	res = rdev->desc->ops->set_voltage(rdev->desc, mvolt);
@@ -346,7 +343,7 @@ TEE_Result regulator_set_min_voltage(struct rdev *rdev)
  * Get regulator voltage level in millivolt
  *
  * @rdev - regulator device
- * @mv - Output voltage level
+ * @level_mv - Output voltage level
  */
 TEE_Result regulator_get_voltage(const struct rdev *rdev, uint16_t *level_mv)
 {
@@ -414,7 +411,7 @@ TEE_Result regulator_list_voltages(struct rdev *rdev, uint16_t **levels,
 
 	/* Verify that max val is a valid value */
 	if (rdev->max_mv != ref[n - 1]) {
-		EMSG("regul %s: max value %u is invalid",
+		EMSG("regul %s: max value %"PRIu16" is invalid",
 		     rdev->desc->node_name, rdev->max_mv);
 		return TEE_ERROR_GENERIC;
 	}
@@ -440,7 +437,7 @@ TEE_Result regulator_list_voltages(struct rdev *rdev, uint16_t **levels,
 	if (levels)
 		*levels = ref;
 
-	FMSG("rdev->min_mv=%u rdev->max_mv=%u", rdev->min_mv, rdev->max_mv);
+	FMSG("min_mv=%"PRIu16" max_mv=%"PRIu16, rdev->min_mv, rdev->max_mv);
 
 	return TEE_SUCCESS;
 }
@@ -563,8 +560,8 @@ static TEE_Result parse_properties(const void *fdt, struct rdev *rdev, int node)
 	cuint = fdt_getprop(fdt, node, "regulator-ramp-delay", NULL);
 	if (cuint) {
 		rdev->ramp_delay_uv_per_us = (uint32_t)(fdt32_to_cpu(*cuint));
-		FMSG("%s: ramp delay = %u (uV/us)", rdev->desc->node_name,
-		     rdev->ramp_delay_uv_per_us);
+		FMSG("%s: ramp delay = %"PRIu32" (uV/us)",
+		     rdev->desc->node_name, rdev->ramp_delay_uv_per_us);
 	}
 
 	cuint = fdt_getprop(fdt, node, "regulator-enable-ramp-delay", NULL);
@@ -575,6 +572,11 @@ static TEE_Result parse_properties(const void *fdt, struct rdev *rdev, int node)
 	}
 
 	rdev->reg_name = fdt_getprop(fdt, node, "regulator-name", NULL);
+	if (rdev->reg_name) {
+		rdev->reg_name = strdup(rdev->reg_name);
+		if (!rdev->reg_name)
+			panic();
+	}
 
 	return TEE_SUCCESS;
 }
@@ -614,7 +616,7 @@ static void parse_low_power_mode(const void *fdt, struct rdev *rdev, int node,
 	if (cuint) {
 		uint16_t mv = (uint16_t)(fdt32_to_cpu(*cuint) / 1000U);
 
-		FMSG("%s: mode:%d suspend mv=%u", rdev->desc->node_name,
+		FMSG("%s: mode:%d suspend mv=%"PRIu16, rdev->desc->node_name,
 		     mode, mv);
 
 		rdev->lp_state[mode] |= LP_STATE_SET_VOLT;
@@ -730,6 +732,7 @@ TEE_Result regulator_register(const struct regul_desc *desc, int node)
 	TEE_Result res = TEE_ERROR_OUT_OF_MEMORY;
 	struct rdev *rdev = NULL;
 	size_t lp_mode_count = plat_get_lp_mode_count();
+	uint16_t mv = 0;
 
 	assert(desc);
 
@@ -756,6 +759,7 @@ TEE_Result regulator_register(const struct regul_desc *desc, int node)
 	if (desc->ops->list_voltages) {
 		uint16_t *levels = NULL;
 		size_t count = 0;
+		size_t __maybe_unused i = 0;
 
 		lock_driver(rdev);
 		res = desc->ops->list_voltages(desc, &levels, &count);
@@ -767,6 +771,8 @@ TEE_Result regulator_register(const struct regul_desc *desc, int node)
 			goto out;
 		}
 		assert(levels && count);
+		for (i = 0; i < count - 1; i++)
+			assert(levels[i] <= levels[i + 1]);
 
 		rdev->min_mv = levels[0];
 		rdev->max_mv = levels[count - 1];
@@ -778,12 +784,26 @@ TEE_Result regulator_register(const struct regul_desc *desc, int node)
 	if (res)
 		goto out;
 
+	if (regulator_get_voltage(rdev, &mv) == TEE_SUCCESS) {
+		rdev->cur_mv = mv;
+
+		if (mv < rdev->min_mv || mv > rdev->max_mv) {
+			FMSG("Update regulator %s to %"PRIu16"mV",
+			     desc->node_name, rdev->min_mv);
+
+			res = regulator_set_voltage(rdev, rdev->min_mv);
+			if (res)
+				goto out;
+		}
+	}
+
 	SLIST_INSERT_HEAD(&regulator_device_list, rdev, link);
 
 out:
 	if (res) {
 		free(rdev->lp_state);
 		free(rdev->lp_mv);
+		free(rdev);
 	}
 
 	return res;
@@ -796,7 +816,7 @@ out:
  * boot/resume from suspend sequences.
  *
  * @rdev - regulator device
- * @mode - low power mode index
+ * @pm_hint - Power level hint provided by PM framework
  */
 static TEE_Result suspend_regulator(struct rdev *rdev, unsigned int pm_hint)
 {
@@ -816,6 +836,7 @@ static TEE_Result suspend_regulator(struct rdev *rdev, unsigned int pm_hint)
 		}
 	}
 
+	/* Ensure boot-on regulators are enabled when resuming */
 	if (rdev->flags & REGUL_BOOT_ON)
 		res = regulator_enable(rdev);
 
@@ -917,7 +938,7 @@ void regulator_core_dump(void)
 		if (rdev->supply_dev)
 			supply = rdev->supply_dev->desc->node_name;
 
-		FMSG("%s %s %d\t%d\t%"PRIu16"\t%"PRIu16"\t%"PRIu16"\t%#"PRIx32"\t%s\n",
+		FMSG("%s %s %"PRIu8"\t%d\t%"PRIu16"\t%"PRIu16"\t%"PRIu16"\t%#"PRIx16"\t%s\n",
 		     reg, name, rdev->use_count, regulator_is_enabled(rdev), mv,
 		     min_mv, max_mv, rdev->flags, supply);
 	}
@@ -950,24 +971,6 @@ static TEE_Result regulator_core_config(void)
 	}
 
 	SLIST_FOREACH(rdev, &regulator_device_list, link) {
-		uint16_t mv = 0;
-		uint16_t min_mv = 0;
-		uint16_t max_mv = 0;
-
-		regulator_get_range(rdev, &min_mv, &max_mv);
-
-		res = regulator_get_voltage(rdev, &mv);
-		if (res)
-		    break;
-
-		rdev->cur_mv = mv;
-
-		if ((mv < min_mv) || (mv > max_mv)) {
-			res = regulator_set_voltage(rdev, min_mv);
-			if (res)
-				break;
-		}
-
 		/*
 		 * Enable always-on regulator and increment its use_count so that
 		 * the regulator is not being disabled during clean-up sequence.

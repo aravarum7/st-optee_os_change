@@ -12,6 +12,7 @@
 #include <drivers/stm32mp1_pmic.h>
 #include <drivers/stm32mp1_pwr.h>
 #include <drivers/stpmic1.h>
+#include <drivers/stpmic1_regulator.h>
 #include <io.h>
 #include <keep.h>
 #include <kernel/boot.h>
@@ -112,40 +113,6 @@ const char *stm32mp_pmic_get_cpu_supply_name(void)
 	return cpu_supply_name;
 }
 
-/* Preallocate not that much regu references */
-static char *nsec_access_regu_name[PMIC_REGU_COUNT];
-
-bool stm32mp_nsec_can_access_pmic_regu(const char *name)
-{
-	size_t n = 0;
-
-	for (n = 0; n < ARRAY_SIZE(nsec_access_regu_name); n++)
-		if (nsec_access_regu_name[n] &&
-		    !strcmp(nsec_access_regu_name[n], name))
-			return true;
-
-	return false;
-}
-
-static void register_nsec_regu(const char *name_ref)
-{
-	size_t n = 0;
-
-	assert(!stm32mp_nsec_can_access_pmic_regu(name_ref));
-
-	for (n = 0; n < ARRAY_SIZE(nsec_access_regu_name); n++) {
-		if (!nsec_access_regu_name[n]) {
-			nsec_access_regu_name[n] = strdup(name_ref);
-
-			if (!nsec_access_regu_name[n])
-				panic();
-			break;
-		}
-	}
-
-	assert(stm32mp_nsec_can_access_pmic_regu(name_ref));
-}
-
 static void parse_regulator_fdt_nodes(void)
 {
 	int pmic_node = 0;
@@ -178,10 +145,8 @@ static void parse_regulator_fdt_nodes(void)
 
 		assert(stpmic1_regulator_is_valid(regu_name));
 
-		if (status & DT_STATUS_OK_NSEC)
-			register_nsec_regu(regu_name);
-
-		register_pmic_regulator(regu_name, regu_node);
+		if (register_pmic_regulator(regu_name, regu_node))
+			panic();
 	}
 
 	if (save_cpu_supply_name())
@@ -241,12 +206,11 @@ static TEE_Result pmic_set_state(const struct regul_desc *desc, bool enable)
 
 static TEE_Result pmic_get_state(const struct regul_desc *desc, bool *enabled)
 {
-	FMSG("%s: get state\n", desc->node_name);
+	FMSG("%s: get state", desc->node_name);
 
 	*enabled = stpmic1_is_regulator_enabled(desc->node_name);
 
 	return TEE_SUCCESS;
-
 }
 
 static TEE_Result pmic_get_voltage(const struct regul_desc *desc, uint16_t *mv)
@@ -290,7 +254,7 @@ static TEE_Result pmic_set_flag(const struct regul_desc *desc, uint16_t flag)
 {
 	int ret = 0;
 
-	FMSG("%s: set_flag 0x%x\n", desc->node_name, flag);
+	FMSG("%s: set_flag %#"PRIx16, desc->node_name, flag);
 
 	switch (flag) {
 	case REGUL_OCP:
@@ -343,7 +307,8 @@ static TEE_Result driver_suspend(const struct regul_desc *desc, uint8_t state,
 {
 	int ret = 0;
 
-	FMSG("%s: suspend state:%u %u mV", desc->node_name, state, mv);
+	FMSG("%s: suspend state:%"PRIu8", %"PRIu16" mV", desc->node_name,
+	     state, mv);
 
 	if (!stpmic1_regu_has_lp_cfg(desc->node_name))
 		return TEE_SUCCESS;
@@ -373,7 +338,7 @@ static TEE_Result driver_suspend(const struct regul_desc *desc, uint8_t state,
 	return 0;
 }
 
-struct regul_ops pmic_ops = {
+const struct regul_ops pmic_ops = {
 	.set_state = pmic_set_state,
 	.get_state = pmic_get_state,
 	.set_voltage = pmic_set_voltage,
@@ -438,7 +403,7 @@ static TEE_Result register_pmic_regulator(const char *regu_name, int node)
 
 	res = regulator_register(pmic_reguls + i, node);
 	if (res)
-		EMSG("Failed to register %s", regu_name);
+		EMSG("Failed to register %s, error: %#"PRIx32, regu_name, res);
 
 	return res;
 }
@@ -499,10 +464,11 @@ static void register_non_secure_pmic(void)
 	if (IS_ENABLED(CFG_STM32MP15)) {
 		stm32mp_register_non_secure_periph_iomem(i2c_pmic_handle->base.pa);
 		/*
-		* Non secure PMIC can be used by secure world during power state
-		* transition when non-secure world is suspended. Therefore secure
-		* the I2C clock parents, if not specifically the I2C clock itself.
-		*/
+		 * Non secure PMIC can be used by secure world during power
+		 * state transition when non-secure world is suspended.
+		 * Therefore secure the I2C clock parents, if not specifically
+		 * the I2C clock itself.
+		 */
 		clock_id = stm32mp_rcc_clk_to_clock_id(i2c_pmic_handle->clock);
 		stm32mp_register_clock_parents_secure(clock_id);
 	}
@@ -529,10 +495,9 @@ static enum itr_return stpmic1_irq_handler(struct itr_handler *handler)
 						   read_val))
 				panic();
 
-			/* forward falling interrupt to non-secure */
-			if (i == 0 && (read_val & BIT(IT_PONKEY_F)))
-				if (it_id)
-					notif_send_it(*it_id);
+			/* Forward falling interrupt to non-secure */
+			if (i == 0 && (read_val & BIT(IT_PONKEY_F)) && it_id)
+				notif_send_it(*it_id);
 		}
 	}
 
@@ -613,7 +578,7 @@ static TEE_Result stm32_pmic_probe(const void *fdt, int node,
 
 		cuint = fdt_getprop(fdt, node, "st,notif-it-id", NULL);
 		if (cuint) {
-			it_id = calloc(1, sizeof(it_id));
+			it_id = calloc(1, sizeof(*it_id));
 			if (!it_id)
 				return TEE_ERROR_OUT_OF_MEMORY;
 

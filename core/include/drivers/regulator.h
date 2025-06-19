@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2020-2021, STMicroelectronics - All Rights Reserved
  */
-#ifndef REGULATOR_H
-#define REGULATOR_H
+#ifndef DRIVERS_REGULATOR_H
+#define DRIVERS_REGULATOR_H
 
 #include <sys/queue.h>
 #include <tee_api_types.h>
@@ -132,4 +132,4 @@ static inline void regulator_core_dump(void)
 }
 #endif
 
-#endif /* REGULATOR_H */
+#endif /* DRIVERS_REGULATOR_H */

@@ -1,12 +1,12 @@
- // SPDX-License-Identifier: BSD-2-Clause
- /*
-  * Copyright (C) 2020-2021, STMicroelectronics - All Rights Reserved
-  */
+// SPDX-License-Identifier: BSD-2-Clause
+/*
+ * Copyright (C) 2020-2021, STMicroelectronics - All Rights Reserved
+ */
 
 #include <crypto/crypto.h>
 #include <drivers/clk.h>
+#include <drivers/rstctrl.h>
 #include <drivers/stm32_firewall.h>
-#include <drivers/stm32mp1_rcc.h>
 #include <drivers/stm32mp_dt_bindings.h>
 #include <initcall.h>
 #include <kernel/pseudo_ta.h>
@@ -42,15 +42,27 @@ struct rproc_ta_etzpc_rams {
 };
 
 /*
- * struct rproc_ta_memory_region - Represent a remote processor memory mapping
+ * struct rproc_pta_memory_region - Represent a remote processor memory mapping
  * @pa - Memory physical base address from current CPU space
  * @da - Memory physical base address from remote processor space
  * @size - Memory region byte size
  */
-struct rproc_ta_memory_region {
+struct rproc_pta_memory_region {
 	paddr_t pa;
 	paddr_t da;
 	size_t size;
+};
+
+/*
+ * struct rproc_pta_rproc - remote processor structure
+ * @state - current state of the remote processor
+ * @mcu_rst - phandle to the MCU reset
+ * @mcu_hold_rst - phandle to the MCU hold boot
+ */
+struct rproc_pta_rproc {
+	enum rproc_load_state state;
+	struct rstctrl *mcu_rst;
+	struct rstctrl *mcu_hold_rst;
 };
 
 static const struct rproc_ta_etzpc_rams rproc_ta_mp1_m4_rams[] = {
@@ -105,7 +117,7 @@ static const struct rproc_ta_etzpc_rams rproc_ta_mp1_m4_rams[] = {
 	},
 };
 
-static const struct rproc_ta_memory_region rproc_ta_mp1_m4_mems[] = {
+static const struct rproc_pta_memory_region rproc_ta_mp1_m4_mems[] = {
 	/* MCU SRAM */
 	{ .pa = MCUSRAM_BASE, .da = 0x10000000, .size = MCUSRAM_SIZE },
 	/* Alias of the MCU SRAM */
@@ -114,7 +126,7 @@ static const struct rproc_ta_memory_region rproc_ta_mp1_m4_mems[] = {
 	{ .pa = RETRAM_BASE, .da = 0x00000000, .size = RETRAM_SIZE },
 };
 
-static enum rproc_load_state rproc_ta_state;
+static struct rproc_pta_rproc rproc_pta_m4;
 
 static TEE_Result rproc_pta_capabilities(uint32_t pt,
 					 TEE_Param params[TEE_NUM_PARAMS])
@@ -142,7 +154,7 @@ static TEE_Result rproc_pta_capabilities(uint32_t pt,
 
 static TEE_Result da_to_pa(paddr_t da, size_t size, paddr_t *pa)
 {
-	const struct rproc_ta_memory_region *mems = rproc_ta_mp1_m4_mems;
+	const struct rproc_pta_memory_region *mems = rproc_ta_mp1_m4_mems;
 	size_t i = 0;
 
 	DMSG("da addr: %#"PRIxPA" size: %zu", da, size);
@@ -188,7 +200,7 @@ static TEE_Result rproc_pta_load_segment(uint32_t pt,
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
 
-	if (rproc_ta_state != REMOTEPROC_OFF)
+	if (rproc_pta_m4.state != REMOTEPROC_OFF)
 		return TEE_ERROR_BAD_STATE;
 
 	/* Get the physical address in A7 mapping */
@@ -233,7 +245,7 @@ static TEE_Result rproc_pta_set_memory(uint32_t pt,
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
 
-	if (rproc_ta_state != REMOTEPROC_OFF)
+	if (rproc_pta_m4.state != REMOTEPROC_OFF)
 		return TEE_ERROR_BAD_STATE;
 
 	/* Get the physical address in CPU mapping */
@@ -322,8 +334,8 @@ static TEE_Result rproc_pta_start(uint32_t pt,
 						TEE_PARAM_TYPE_NONE,
 						TEE_PARAM_TYPE_NONE,
 						TEE_PARAM_TYPE_NONE);
-	vaddr_t rcc_base = stm32_rcc_base();
 	struct clk *mcu_clk = stm32mp_rcc_clock_id_to_clk(CK_MCU);
+	TEE_Result res = TEE_ERROR_GENERIC;
 
 	if (pt != exp_pt)
 		return TEE_ERROR_BAD_PARAMETERS;
@@ -334,7 +346,7 @@ static TEE_Result rproc_pta_start(uint32_t pt,
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
 
-	if (rproc_ta_state != REMOTEPROC_OFF)
+	if (rproc_pta_m4.state != REMOTEPROC_OFF)
 		return TEE_ERROR_BAD_STATE;
 
 	clk_enable(mcu_clk);
@@ -348,10 +360,14 @@ static TEE_Result rproc_pta_start(uint32_t pt,
 	 * No need to release the MCU reset as it is automatically released by
 	 * the hardware.
 	 */
-	io_setbits32(rcc_base + RCC_MP_GCR, RCC_MP_GCR_BOOT_MCU);
-	io_clrbits32(rcc_base + RCC_MP_GCR, RCC_MP_GCR_BOOT_MCU);
+	res = rstctrl_deassert(rproc_pta_m4.mcu_hold_rst);
+	if(res)
+		return res;
+	res = rstctrl_assert(rproc_pta_m4.mcu_hold_rst);
+	if(res)
+		return res;
 
-	rproc_ta_state = REMOTEPROC_ON;
+	rproc_pta_m4.state = REMOTEPROC_ON;
 
 	return TEE_SUCCESS;
 }
@@ -365,7 +381,7 @@ static TEE_Result rproc_pta_stop(uint32_t pt,
 						TEE_PARAM_TYPE_NONE);
 	struct clk *mcu_clk = stm32mp_rcc_clock_id_to_clk(CK_MCU);
 	const struct rproc_ta_etzpc_rams *ram = NULL;
-	vaddr_t rcc_base = stm32_rcc_base();
+	TEE_Result res = TEE_ERROR_GENERIC;
 	unsigned int i = 0;
 
 	if (pt != exp_pt)
@@ -377,13 +393,17 @@ static TEE_Result rproc_pta_stop(uint32_t pt,
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
 
-	if (rproc_ta_state != REMOTEPROC_ON)
+	if (rproc_pta_m4.state != REMOTEPROC_ON)
 		return TEE_ERROR_BAD_STATE;
 
 	/* The firmware is stopped (reset with holdboot is active) */
-	io_clrbits32(rcc_base + RCC_MP_GCR, RCC_MP_GCR_BOOT_MCU);
+	res = rstctrl_assert(rproc_pta_m4.mcu_hold_rst);
+	if(res)
+		return res;
 
-	stm32_reset_set(MCU_R);
+	res = rstctrl_assert(rproc_pta_m4.mcu_rst);
+	if(res)
+		return res;
 
 	clk_disable(mcu_clk);
 
@@ -401,7 +421,7 @@ static TEE_Result rproc_pta_stop(uint32_t pt,
 			       0, ram->size);
 		}
 	}
-	rproc_ta_state = REMOTEPROC_OFF;
+	rproc_pta_m4.state = REMOTEPROC_OFF;
 
 	return TEE_SUCCESS;
 }
@@ -456,7 +476,7 @@ static TEE_Result rproc_pta_verify_digest(uint32_t pt,
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
 
-	if (rproc_ta_state != REMOTEPROC_OFF)
+	if (rproc_pta_m4.state != REMOTEPROC_OFF)
 		return TEE_ERROR_BAD_STATE;
 
 	keyinfo = params[1].memref.buffer;
@@ -518,17 +538,26 @@ static TEE_Result
 
 static TEE_Result rproc_pta_init(void)
 {
-	vaddr_t rcc_base = stm32_rcc_base();
+	TEE_Result res = TEE_ERROR_GENERIC;
 
 	/* Configure the Cortex-M4 rams access right for secure context only */
 	rproc_pta_mem_protect(true);
 
 	/* Initialise the context */
-	rproc_ta_state = REMOTEPROC_OFF;
+	rproc_pta_m4.state = REMOTEPROC_OFF;
 
+	rproc_pta_m4.mcu_rst = stm32mp_rcc_reset_id_to_rstctrl(MCU_R);
+	rproc_pta_m4.mcu_hold_rst = stm32mp_rcc_reset_id_to_rstctrl(MCU_HOLD_BOOT_R);
+	if(!rproc_pta_m4.mcu_rst || !rproc_pta_m4.mcu_hold_rst)
+		return TEE_ERROR_ACCESS_DENIED;
 	/* Ensure that the MCU is HOLD */
-	io_clrbits32(rcc_base + RCC_MP_GCR, RCC_MP_GCR_BOOT_MCU);
-	stm32_reset_set(MCU_R);
+	res = rstctrl_assert(rproc_pta_m4.mcu_hold_rst);
+	if (res)
+		return res;
+
+	res = rstctrl_assert(rproc_pta_m4.mcu_rst);
+	if (res)
+		return res;
 
 	return TEE_SUCCESS;
 }

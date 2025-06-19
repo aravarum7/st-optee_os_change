@@ -83,8 +83,7 @@ struct stm32_firewall_compat {
 /**
  * @brief struct stm32_firewall_cfg - Firewall configuration structure
  *
- * @access: Defined configuration value defining master and its
- * associated firewall configuration.
+ * @access: Bit flags for permission, FWLL_[N]SEC_*
  */
 struct stm32_firewall_cfg {
 	uint32_t access;
@@ -121,9 +120,10 @@ struct stm32_firewall_ops {
  * @brief struct stm32_firewall_device
  *
  * @name: device name.
- * @dev_list: list on counter device.
  * @ops: Operation table of the firewall.
+ * @compat: List of the devices controlled by the firewall instance
  * @priv: Optional private data supplied by driver.
+ * @dev_list: Firewall instance reference registered firewall list
  */
 struct stm32_firewall_device {
 	const char *name;
@@ -156,7 +156,7 @@ static inline void *stm32_firewall_priv(struct stm32_firewall_device *fdev)
  * @size: Size to be checked
  * @cfg: Tested configuration
  *
- * Returns a TEE_Result compliant value.
+ * Returns TEE_SUCCESS if access is permitted, or an error code otherwise
  */
 TEE_Result stm32_firewall_check_access(paddr_t base, size_t size,
 				       const struct stm32_firewall_cfg *cfg);

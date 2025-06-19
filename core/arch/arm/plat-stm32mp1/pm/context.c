@@ -9,7 +9,6 @@
 #include <crypto/crypto.h>
 #include <drivers/clk.h>
 #include <drivers/gic.h>
-#include <drivers/stm32_rng.h>
 #include <drivers/stm32_rtc.h>
 #include <drivers/stm32mp_dt_bindings.h>
 #include <drivers/stm32mp1_ddrc.h>
@@ -189,7 +188,7 @@ static void __maybe_unused dump_context(void)
  */
 static void save_time(void)
 {
-        vaddr_t stgen = stm32mp_stgen_base();
+	vaddr_t stgen = stm32mp_stgen_base();
 
 	plat_ctx.stgen_cnt_h = io_read32(stgen + CNTCVU_OFFSET);
 	plat_ctx.stgen_cnt_l = io_read32(stgen + CNTCVL_OFFSET);
@@ -213,7 +212,7 @@ static void __maybe_unused print_ccm_decryption_duration(void)
 		((unsigned long long)ctx->stgen_cnt * 1000) /
 		io_read32(stgen + CNTFID_OFFSET));
 
-	clk_enable(pm_clocks.bkpsram);
+	clk_disable(pm_clocks.bkpsram);
 }
 #else
 static void __maybe_unused print_ccm_decryption_duration(void)
@@ -244,7 +243,7 @@ static void restore_time(void)
 	/* Balance clock enable(RTC) at save_time() */
 	clk_disable(pm_clocks.rtc);
 
-#ifndef CFG_STM32MP13
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 	print_ccm_decryption_duration();
 #endif
 }
@@ -284,7 +283,7 @@ void stm32mp_pm_wipe_context(void)
 	clk_enable(pm_clocks.bkpsram);
 
 	memset(ctx, 0xa5, sizeof(*ctx));
-#ifndef CFG_STM32MP13
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 	memset(mailbox, 0xa5, sizeof(*mailbox));
 #endif
 
@@ -332,8 +331,9 @@ __maybe_unused static void save_ddr_training_area(void)
 	paddr_t pa = DDR_BASE;
 	void *va = phys_to_virt(pa, MEM_AREA_RAM_NSEC, SMALL_PAGE_SIZE);
 
-	memcpy(&mailbox->ddr_training_backup[0], va, size);
+	assert(va);
 
+	memcpy(&mailbox->ddr_training_backup[0], va, size);
 }
 
 /*
@@ -362,7 +362,7 @@ static void load_earlyboot_pm_mailbox(void)
 
 	assert(clk_is_enabled(pm_clocks.bkpsram));
 
-#ifdef CFG_STM32MP15
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 	memset(mailbox, 0, sizeof(*mailbox));
 
 	mailbox->zq0cr0_zdata = get_ddrphy_calibration();
@@ -370,12 +370,12 @@ static void load_earlyboot_pm_mailbox(void)
 #if CFG_STM32MP1_PM_CONTEXT_VERSION >= 2
 	save_pll1_settings();
 #endif
-#endif /*CFG_STM32MP15*/
+#endif /* CFG_STM32MP1_OPTEE_IN_SYSRAM */
 
 	save_ddr_training_area();
 }
 
-#if defined(CFG_STM32_CRYP) && defined(CFG_STM32MP15)
+#if defined(CFG_STM32_CRYP) && defined(CFG_STM32MP1_OPTEE_IN_SYSRAM)
 /*
  * CRYP relies on standard format for CCM IV/B0/CRT0 data. Our sequence uses
  * no AAD, 4 bytes to encode the payload byte size and a 11 byte nonce.
@@ -457,7 +457,7 @@ static void __maybe_unused save_teeram_in_ddr(void)
 {
 	panic("Mandates CRYP support");
 }
-#endif /* CFG_STM32_CRYP && CFG_STM32MP15 */
+#endif /* CFG_STM32_CRYP && CFG_STM32MP1_OPTEE_IN_SYSRAM */
 
 /* Finalize the PM mailbox now that everything is loaded */
 static void enable_pm_mailbox(unsigned int suspend)
@@ -473,7 +473,7 @@ static void enable_pm_mailbox(unsigned int suspend)
 		magic = BOOT_API_A7_CORE0_MAGIC_NUMBER;
 		mailbox->magic = STANDBY_CONTEXT_MAGIC;
 
-#ifdef CFG_STM32MP13
+#ifndef CFG_STM32MP1_OPTEE_IN_SYSRAM
 		hint = virt_to_phys(stm32mp_sysram_resume);
 #else
 		hint = virt_to_phys(&get_retram_resume_ctx()->resume_sequence);
@@ -525,7 +525,7 @@ TEE_Result stm32mp_pm_save_context(unsigned int soc_mode)
 		return res;
 
 	if (!need_to_backup_cpu_context(soc_mode)) {
-#ifndef CFG_STM32MP13
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 		if (need_to_backup_stop_context(soc_mode))
 			stm32mp1_clk_save_context_for_stop();
 #endif
@@ -536,7 +536,7 @@ TEE_Result stm32mp_pm_save_context(unsigned int soc_mode)
 	gate_pm_context_clocks(true);
 	load_earlyboot_pm_mailbox();
 
-#ifndef CFG_STM32MP13
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 	save_teeram_in_ddr();
 #endif
 	enable_pm_mailbox(1);
@@ -548,7 +548,7 @@ void stm32mp_pm_restore_context(unsigned int soc_mode)
 {
 	if (need_to_backup_cpu_context(soc_mode))
 		gate_pm_context_clocks(false);
-#ifndef CFG_STM32MP13
+#ifdef CFG_STM32MP1_OPTEE_IN_SYSRAM
 	else if (need_to_backup_stop_context(soc_mode))
 		stm32mp1_clk_restore_context_for_stop();
 #endif
@@ -567,35 +567,38 @@ void stm32mp_pm_shutdown_context(void)
 	gate_pm_context_clocks(false);
 }
 
+#ifndef CFG_STM32MP1_OPTEE_IN_SYSRAM
 TEE_Result stm32mp_pm_call_bl2_lp_entry(unsigned int soc_mode)
 {
-	struct pm_mailbox *mailbox;
-	void (*stm32_pwr_down_wfi)(bool is_cstop, unsigned int soc_mode);
+	struct pm_mailbox *mailbox = NULL;
+	void (*stm32_pwr_down_wfi)(bool is_cstop, unsigned int soc_mode) = NULL;
 
 	clk_enable(pm_clocks.bkpsram);
 
 	mailbox = get_pm_mailbox();
 
-	FMSG("BL2 low_power_ep %x", mailbox->low_power_ep);
+	FMSG("BL2 low_power_ep %#"PRIx32, mailbox->low_power_ep);
 
 	stm32_pwr_down_wfi = (void *)mailbox->low_power_ep;
 
 	dcache_op_all(DCACHE_OP_CLEAN_INV);
 
-	dsb();
+	/* Disable Cache & MMU before calling low_power section */
+	write_sctlr(read_sctlr() & ~(SCTLR_C | SCTLR_M));
 
-	/* Disable MMU before calling low_power section */
-	write_sctlr(read_sctlr() & ~SCTLR_M);
+	dsb();
+	isb();
 
 	(*stm32_pwr_down_wfi)(true, soc_mode);
 
-	/* Enable MMU */
-	write_sctlr(read_sctlr() | SCTLR_M);
+	/* Enable Cache & MMU */
+	write_sctlr(read_sctlr() | SCTLR_C | SCTLR_M);
 
 	clk_disable(pm_clocks.bkpsram);
 
 	return TEE_SUCCESS;
 }
+#endif /* CFG_STM32MP1_OPTEE_IN_SYSRAM */
 
 static TEE_Result init_pm_support(void)
 {

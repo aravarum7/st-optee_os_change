@@ -6,6 +6,8 @@
 #ifndef __DRIVERS_STM32MP13_RCC_H__
 #define __DRIVERS_STM32MP13_RCC_H__
 
+#include <types_ext.h>
+
 #define RCC_SECCFGR				U(0x0)
 #define RCC_MP_SREQSETR				U(0x100)
 #define RCC_MP_SREQCLRR				U(0x104)
@@ -1872,8 +1874,7 @@
 #define RCC_MP_CIFR_MASK			U(0x110F1F)
 #define RCC_OFFSET_MASK				GENMASK_32(11, 0)
 
-#include <types_ext.h>
-
-vaddr_t stm32_rcc_base(void);
+#define RCC_MP_GRSTCSETR_MPSYSRST		BIT(0)
+#define RCC_MP_GRSTCSETR			U(0x114)
 
 #endif /*__DRIVERS_STM32MP13_RCC_H__*/

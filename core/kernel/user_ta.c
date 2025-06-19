@@ -337,7 +337,6 @@ static void user_ta_gprof_set_status(enum ts_gprof_status status)
 
 static void free_utc(struct user_ta_ctx *utc)
 {
-	tee_pager_rem_um_regions(&utc->uctx);
 
 	/*
 	 * Close sessions opened by this TA
@@ -374,7 +373,7 @@ static uint32_t user_ta_get_instance_id(struct ts_ctx *ctx)
  * Note: this variable is weak just to ease breaking its dependency chain
  * when added to the unpaged area.
  */
-const struct ts_ops user_ta_ops __weak __rodata_unpaged("user_ta_ops") = {
+const struct ts_ops user_ta_ops __weak __relrodata_unpaged("user_ta_ops") = {
 	.enter_open_session = user_ta_enter_open_session,
 	.enter_invoke_cmd = user_ta_enter_invoke_cmd,
 	.enter_close_session = user_ta_enter_close_session,
@@ -421,15 +420,12 @@ TEE_Result tee_ta_init_user_ta_session(const TEE_UUID *uuid,
 	if (!utc)
 		return TEE_ERROR_OUT_OF_MEMORY;
 
-	utc->uctx.is_initializing = true;
 	TAILQ_INIT(&utc->open_sessions);
 	TAILQ_INIT(&utc->cryp_states);
 	TAILQ_INIT(&utc->objects);
 	TAILQ_INIT(&utc->storage_enums);
 	condvar_init(&utc->ta_ctx.busy_cv);
 	utc->ta_ctx.ref_count = 1;
-
-	utc->uctx.ts_ctx = &utc->ta_ctx.ts_ctx;
 
 	/*
 	 * Set context TA operation structure. It is required by generic
@@ -438,9 +434,14 @@ TEE_Result tee_ta_init_user_ta_session(const TEE_UUID *uuid,
 	set_ta_ctx_ops(&utc->ta_ctx);
 
 	utc->ta_ctx.ts_ctx.uuid = *uuid;
-	res = vm_info_init(&utc->uctx);
+	res = vm_info_init(&utc->uctx, &utc->ta_ctx.ts_ctx);
 	if (res)
 		goto out;
+	utc->uctx.is_initializing = true;
+
+#ifdef CFG_TA_PAUTH
+	crypto_rng_read(&utc->uctx.keys, sizeof(utc->uctx.keys));
+#endif
 
 	mutex_lock(&tee_ta_mutex);
 	s->ts_sess.ctx = &utc->ta_ctx.ts_ctx;
@@ -482,7 +483,6 @@ TEE_Result tee_ta_init_user_ta_session(const TEE_UUID *uuid,
 out:
 	if (res) {
 		condvar_destroy(&utc->ta_ctx.busy_cv);
-		pgt_flush_ctx(&utc->ta_ctx.ts_ctx);
 		free_utc(utc);
 	}
 

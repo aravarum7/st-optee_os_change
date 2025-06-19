@@ -93,6 +93,9 @@ SECTIONS
 	.text : {
 		KEEP(*(.text._start))
 		__identity_map_init_start = .;
+		__text_data_start = .;
+		*(.identity_map.data)
+		__text_data_end = .;
 		*(.identity_map .identity_map.* \
 			/*
 			 * The one below is needed because it's a weak
@@ -131,12 +134,24 @@ SECTIONS
 #include <rodata_unpaged.ld.S>
 #else
 		*(.rodata .rodata.*)
+#ifndef CFG_CORE_ASLR
 		. = ALIGN(8);
 		KEEP(*(SORT(.scattered_array*)));
+#endif
 #endif
 		. = ALIGN(8);
 		__rodata_end = .;
 	}
+
+#if defined(CFG_CORE_ASLR)
+	.data.rel.ro : {
+#if !defined(CFG_WITH_PAGER)
+		. = ALIGN(8);
+		KEEP(*(SORT(.scattered_array*)));
+#endif
+		*(.data.rel.ro.__unpaged .data.rel.ro.__unpaged.*)
+	}
+#endif
 
 	.got : { *(.got.plt) *(.got) }
 	.note.gnu.property : { *(.note.gnu.property) }
@@ -300,6 +315,7 @@ SECTIONS
 		"read-write memory is not paged aligned")
 
 	.text_init : {
+		__text_init_start = .;
 /*
  * Include list of sections needed for boot initialization, this list
  * overlaps with unpaged.ld.S but since unpaged.ld.S is first all those
@@ -310,6 +326,7 @@ SECTIONS
 		/* Make sure constructor functions are available during init */
 		KEEP(*(.text._GLOBAL__sub_*));
 		. = ALIGN(8);
+		__text_init_end = .;
 	}
 
 #ifdef CFG_CORE_RODATA_NOEXEC
@@ -319,16 +336,23 @@ SECTIONS
 	__flatmap_init_ro_start = .;
 
 	.rodata_init : {
+		__rodata_init_start = .;
 #include <rodata_init.ld.S>
-
+#ifndef CFG_CORE_ASLR
 		. = ALIGN(8);
 		KEEP(*(SORT(.scattered_array*)));
-
-		. = ALIGN(8);
+#endif
 		__rodata_init_end = .;
 	}
+#ifdef CFG_CORE_ASLR
+	.data.rel.ro_init : ALIGN(8) {
+		KEEP(*(SORT(.scattered_array*)));
+	}
+#endif
+	. = ALIGN(8);
+	__ro_and_relro_data_init_end = .;
 
-	__init_end = ALIGN(__rodata_init_end, SMALL_PAGE_SIZE);
+	__init_end = ALIGN(__ro_and_relro_data_init_end, SMALL_PAGE_SIZE);
 	__get_tee_init_end = __init_end;
 	__init_size = __init_end - __init_start;
 
@@ -336,7 +360,9 @@ SECTIONS
 	__flatmap_init_ro_size = __init_end - __flatmap_init_ro_start;
 
 	.rodata_pageable : ALIGN(8) {
+		__rodata_pageable_start = .;
 		*(.rodata*)
+		__rodata_pageable_end = .;
 	}
 
 #ifdef CFG_CORE_RODATA_NOEXEC
@@ -344,8 +370,10 @@ SECTIONS
 #endif
 
 	.text_pageable : ALIGN(8) {
+		__text_pageable_start = .;
 		*(.text*)
 		. = ALIGN(SMALL_PAGE_SIZE);
+		__text_pageable_end = .;
 	}
 
 	__pageable_part_end = .;
