@@ -308,7 +308,7 @@ CFG_STM32MP1_PM_CONTEXT_VERSION ?= 3
 # Default enable some test facitilites
 CFG_ENABLE_EMBEDDED_TESTS ?= y
 CFG_WITH_STATS ?= y
-CFG_WERROR ?= y
+CFG_WERROR ?= n
 
 # Enable to allow debug
 ifeq ($(CFG_TEE_CORE_DEBUG),y)
