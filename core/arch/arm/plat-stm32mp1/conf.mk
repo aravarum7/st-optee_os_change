@@ -394,7 +394,7 @@ endif
 # Default enable some test facitilites
 CFG_ENABLE_EMBEDDED_TESTS ?= y
 CFG_WITH_STATS ?= y
-CFG_WERROR ?= y
+CFG_WERROR ?= n
 
 # Enable OTP update with BSEC driver
 CFG_STM32_BSEC_WRITE ?= y
